@@ -34,6 +34,9 @@ class Settings:
     vram_mode: str = "balanced"
     vae_fp16_fix: bool = True
     last_checkpoint: str = ""
+    # Optional xAI API key (billed separately from the SuperGrok subscription).
+    grok_api_key: str = ""
+    grok_model: str = ""
     ui: dict = field(default_factory=dict)
 
     @classmethod

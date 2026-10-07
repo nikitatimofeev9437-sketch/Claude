@@ -8,8 +8,8 @@ import sys
 from pathlib import Path
 
 from PIL import Image
-from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QAction, QIcon, QKeySequence, QPixmap
+from PySide6.QtCore import QSize, Qt, QUrl
+from PySide6.QtGui import QAction, QDesktopServices, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
     QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit,
@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from ..core import config, imaging
+from ..core import assistant, config, imaging
 from ..core.engine import RESOLUTIONS, SAMPLERS, Engine, Job, LoraSpec
 from ..core.presets import load_presets
 from .widgets import ImageView, MaskCanvas, pil_to_qimage
@@ -54,6 +54,7 @@ class MainWindow(QMainWindow):
         self.engine = Engine(self.settings)
         self.presets = load_presets()
         self.task: Task | None = None
+        self.grok_task: Task | None = None
         self.last_seed: int | None = None
         self.pose_source: Image.Image | None = None
         self.results: list[tuple[Path, str]] = []
@@ -103,7 +104,9 @@ class MainWindow(QMainWindow):
         lay.addWidget(g)
 
         tabs = QTabWidget()
+        self.left_tabs = tabs
         tabs.addTab(self._tab_main(), "Основное")
+        tabs.addTab(self._tab_grok(), "Grok")
         tabs.addTab(self._tab_extras(), "LoRA и поза")
         tabs.addTab(self._tab_quality(), "Качество")
         lay.addWidget(tabs, 1)
@@ -244,6 +247,59 @@ class MainWindow(QMainWindow):
         self.batch = _spin(1, 16, 1)
         f.addRow("Количество:", self.batch)
         lay.addWidget(g)
+        lay.addStretch()
+        return w
+
+    def _tab_grok(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+
+        g = QGroupBox("Идея")
+        v = QVBoxLayout(g)
+        v.addWidget(QLabel("Опишите сцену своими словами (можно по-русски):"))
+        self.grok_idea = QPlainTextEdit()
+        self.grok_idea.setPlaceholderText("Рыжая девушка в кожаной куртке на крыше вечером, неоновый свет…")
+        self.grok_idea.setMinimumHeight(110)
+        v.addWidget(self.grok_idea)
+        self.grok_improve = QCheckBox("Взять за основу текущий промпт (доработать его)")
+        self.grok_settings = QCheckBox("Подобрать и настройки (размер, шаги, CFG, сэмплер, hires, лица/руки)")
+        self.grok_settings.setChecked(True)
+        v.addWidget(self.grok_improve)
+        v.addWidget(self.grok_settings)
+        lay.addWidget(g)
+
+        g = QGroupBox("Через подписку SuperGrok (grok.com)")
+        v = QVBoxLayout(g)
+        b = QPushButton("1. Скопировать запрос и открыть Grok")
+        b.clicked.connect(self._grok_copy)
+        v.addWidget(b)
+        b = QPushButton("2. Вставить ответ Grok из буфера обмена")
+        b.clicked.connect(self._grok_paste)
+        v.addWidget(b)
+        hint = QLabel("В чате Grok вставьте запрос (Ctrl+V), дождитесь ответа, нажмите «Копировать» "
+                      "под ответом и затем кнопку 2.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #888;")
+        v.addWidget(hint)
+        lay.addWidget(g)
+
+        g = QGroupBox("Через xAI API (необязательно, платится отдельно от подписки)")
+        f = QFormLayout(g)
+        self.grok_key = QLineEdit(self.settings.grok_api_key)
+        self.grok_key.setEchoMode(QLineEdit.Password)
+        self.grok_key.setPlaceholderText("xai-… с console.x.ai")
+        f.addRow("API-ключ:", self.grok_key)
+        self.grok_model = QLineEdit(self.settings.grok_model)
+        self.grok_model.setPlaceholderText(assistant.DEFAULT_MODEL)
+        f.addRow("Модель:", self.grok_model)
+        self.btn_grok_api = QPushButton("Спросить Grok по API")
+        self.btn_grok_api.clicked.connect(self._grok_api)
+        f.addRow(self.btn_grok_api)
+        lay.addWidget(g)
+
+        self.grok_status = QLabel()
+        self.grok_status.setWordWrap(True)
+        lay.addWidget(self.grok_status)
         lay.addStretch()
         return w
 
@@ -446,8 +502,7 @@ class MainWindow(QMainWindow):
         self.sampler.setCurrentText(ui.get("sampler", self.sampler.currentText()))
         self.upscaler.setCurrentText(ui.get("upscaler", self.upscaler.currentText()))
         self.detail_prompt.setText(ui.get("detail_prompt", ""))
-        idx = self.resolution.findData(tuple(ui.get("resolution") or ()) or None)
-        self.resolution.setCurrentIndex(idx if idx >= 0 else 0)
+        self._select_resolution(tuple(ui.get("resolution") or ()) or None)
         for spec in ui.get("loras", []):
             self._add_lora(spec[0], spec[1])
 
@@ -463,6 +518,8 @@ class MainWindow(QMainWindow):
             **{n: getattr(self, n).isChecked() for n in ("hires", "fix_faces", "fix_hands", "only_masked")},
         }
         self.settings.last_checkpoint = self.checkpoint.currentText()
+        self.settings.grok_api_key = self.grok_key.text().strip()
+        self.settings.grok_model = self.grok_model.text().strip()
         self.settings.save()
 
     def closeEvent(self, e):  # noqa: N802
@@ -509,6 +566,14 @@ class MainWindow(QMainWindow):
         for key, widget in (("steps", self.steps), ("cfg", self.cfg), ("clip_skip", self.clip_skip)):
             if key in s:
                 widget.setValue(s[key])
+
+    def _select_resolution(self, size: tuple[int, int] | None) -> None:
+        # findData() can't match Python tuples, so compare item data directly.
+        for i in range(self.resolution.count()):
+            data = self.resolution.itemData(i)
+            if (tuple(data) if data else None) == (tuple(size) if size else None):
+                self.resolution.setCurrentIndex(i)
+                return
 
     def _on_resolution(self) -> None:
         data = self.resolution.currentData()
@@ -592,6 +657,74 @@ class MainWindow(QMainWindow):
         for r in range(self.lora_table.rowCount()):
             out.append(LoraSpec(self.lora_table.item(r, 0).text(), self.lora_table.cellWidget(r, 1).value()))
         return out
+
+    # ================================================================ grok
+
+    def _grok_request(self) -> tuple[str, str] | None:
+        idea = self.grok_idea.toPlainText().strip()
+        current = self.prompt.toPlainText() if self.grok_improve.isChecked() else ""
+        if not idea and not current:
+            self.grok_status.setText("Сначала опишите идею.")
+            return None
+        try:
+            from ..core import safety
+
+            safety.check(idea, current)
+        except ValueError as e:
+            self.grok_status.setText(str(e))
+            return None
+        preset = self.presets[self.preset.currentIndex()]
+        return assistant.build_request(idea, preset.name, preset.prefix, self.grok_settings.isChecked(), current)
+
+    def _grok_copy(self) -> None:
+        req = self._grok_request()
+        if req is None:
+            return
+        QApplication.clipboard().setText(assistant.chat_text(*req))
+        QDesktopServices.openUrl(QUrl(assistant.GROK_CHAT_URL))
+        self.grok_status.setText("Запрос скопирован. Вставьте его в чат Grok, "
+                                 "затем скопируйте ответ и нажмите кнопку 2.")
+
+    def _grok_paste(self) -> None:
+        self._apply_grok(QApplication.clipboard().text())
+
+    def _grok_api(self) -> None:
+        key = self.grok_key.text().strip()
+        if not key:
+            self.grok_status.setText("Введите API-ключ xAI или используйте кнопки подписки выше.")
+            return
+        req = self._grok_request()
+        if req is None or (self.grok_task and self.grok_task.isRunning()):
+            return
+        model = self.grok_model.text().strip() or assistant.DEFAULT_MODEL
+        self.grok_task = Task(lambda _t: assistant.ask_api(*req, api_key=key, model=model))
+        self.grok_task.done.connect(self._apply_grok)
+        self.grok_task.failed.connect(self.grok_status.setText)
+        self.grok_task.finished.connect(lambda: self.btn_grok_api.setEnabled(True))
+        self.btn_grok_api.setEnabled(False)
+        self.grok_status.setText("Жду ответ Grok…")
+        self.grok_task.start()
+
+    def _apply_grok(self, text: str) -> None:
+        try:
+            r = assistant.parse_answer(text or "")
+        except ValueError as e:
+            self.grok_status.setText(str(e))
+            return
+        self.prompt.setPlainText(r["prompt"])
+        self.negative.setPlainText(r["negative"])
+        if "size" in r:
+            self._select_resolution(r["size"])
+        if "sampler" in r:
+            self.sampler.setCurrentText(r["sampler"])
+        for key, widget in (("steps", self.steps), ("cfg", self.cfg)):
+            if key in r:
+                widget.setValue(r[key])
+        for key, widget in (("hires", self.hires), ("fix_faces", self.fix_faces), ("fix_hands", self.fix_hands)):
+            if key in r:
+                widget.setChecked(r[key])
+        self.grok_status.setText("Промпт применён. " + r.get("comment", ""))
+        self.left_tabs.setCurrentIndex(0)
 
     # ================================================================ generation
 

@@ -85,3 +85,19 @@ def test_lora(eng):
             run(eng, prompt="x", loras=[engine.LoraSpec("loli_style.safetensors", 1.0)])
     finally:
         path.unlink(missing_ok=True)
+
+
+def test_grok_answer_parsing():
+    from studio.core import assistant
+
+    system, user = assistant.build_request("рыжая девушка на крыше", "Pony", "score_9, ", True)
+    assert "score_9" in system and "832x1216" in user
+    r = assistant.parse_answer('Вот:\n```json\n{"prompt": "adult woman, red hair", "negative": "blurry", '
+                               '"width": 900, "height": 1300, "steps": 500, "cfg": 6, "sampler": "Euler a", '
+                               '"hires": true, "fix_faces": "yes"}\n```')
+    assert r["size"] == (832, 1216) and r["steps"] == 60 and r["sampler"] == "Euler a"
+    assert r["hires"] is True and "fix_faces" not in r
+    with pytest.raises(safety.BlockedPrompt):
+        assistant.parse_answer('{"prompt": "schoolgirl"}')
+    with pytest.raises(ValueError):
+        assistant.parse_answer("no json here")
