@@ -101,3 +101,54 @@ def test_grok_answer_parsing():
         assistant.parse_answer('{"prompt": "schoolgirl"}')
     with pytest.raises(ValueError):
         assistant.parse_answer("no json here")
+
+
+def test_pnginfo_roundtrip(eng, monkeypatch):
+    from studio.core import pnginfo
+
+    lora = config.LORAS_DIR / "_meta_lora.safetensors"
+    lora.write_bytes(b"")
+    try:
+        job = engine.Job(width=64, height=64, steps=3, seed=42, prompt="adult woman, (red hair:1.2)",
+                         negative="blurry", cfg=5.5, sampler="Euler a", clip_skip=2,
+                         loras=[engine.LoraSpec("_meta_lora.safetensors", 0.6),
+                                engine.LoraSpec("gone.safetensors", 0.4)],
+                         hires=True, hires_scale=1.5, hires_denoise=0.3, fix_faces=True, detail_strength=0.45)
+        p = pnginfo.parse_parameters(eng._describe(job, safety.harden_negative(job.negative), 42))
+    finally:
+        lora.unlink()
+    assert p["prompt"] == job.prompt and p["negative"] == "blurry"
+    assert (p["steps"], p["cfg"], p["seed"], p["sampler"], p["size"]) == (3, 5.5, 42, "Euler a", (64, 64))
+    assert p["loras"] == [["_meta_lora.safetensors", 0.6]] and p["missing_loras"] == ["gone.safetensors"]
+    assert p["hires"] and p["hires_scale"] == 1.5 and p["hires_denoise"] == 0.3
+    assert p["fix_faces"] and not p["fix_hands"] and p["detail_strength"] == 0.45
+
+    out = run(eng, prompt="adult woman")
+    assert pnginfo.parse_parameters(pnginfo.read_parameters(out[0]))["seed"] == 1
+
+
+def test_pnginfo_a1111():
+    from studio.core import pnginfo
+
+    text = ("masterpiece, woman <lora:someStyle:0.7>, smile\nNegative prompt: bad hands, \"quoted\"\n"
+            "Steps: 30, Sampler: DPM++ 2M, Schedule type: Karras, CFG scale: 7, Seed: 123, Size: 832x1216, "
+            "Model hash: abc, Model: myModel, Denoising strength: 0.4, Hires upscale: 2, Hires steps: 12, "
+            "Hires upscaler: 4x-UltraSharp, ADetailer model: face_yolov8n.pt, Version: v1.10")
+    p = pnginfo.parse_parameters(text)
+    assert p["prompt"] == "masterpiece, woman, smile"
+    assert p["missing_loras"] == ["someStyle"]
+    assert p["sampler"] == "DPM++ 2M Karras" and p["size"] == (832, 1216) and p["model"] == "myModel"
+    assert p["hires"] and p["hires_scale"] == 2.0 and p["hires_denoise"] == 0.4 and p["hires_steps"] == 12
+    assert "strength" not in p and p["fix_faces"]
+
+
+def test_library(tmp_path, monkeypatch):
+    from studio.core import library
+
+    monkeypatch.setattr(library, "LIBRARY_FILE", tmp_path / "prompts.json")
+    library.save("a", {"prompt": "x"})
+    library.save("b", {"prompt": "y"})
+    entries = library.save("a", {"prompt": "z"})
+    assert [e["name"] for e in entries] == ["a", "b"] and entries[0]["ui"]["prompt"] == "z"
+    assert [e["name"] for e in library.delete("a")] == ["b"]
+    assert [e["name"] for e in library.load()] == ["b"]

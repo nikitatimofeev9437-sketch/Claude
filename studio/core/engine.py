@@ -382,7 +382,8 @@ class Engine:
         if job.mode != "txt2img":
             parts.append(f"Denoising strength: {job.strength}")
         if job.loras:
-            parts.append("LoRA: " + ", ".join(f"{x.file}:{x.weight}" for x in job.loras))
+            # Quoted, so the comma-separated list survives parsing (see pnginfo.py).
+            parts.append('LoRA: "' + ", ".join(f"{x.file}:{x.weight}" for x in job.loras) + '"')
         if job.pose_image is not None and job.mode == "txt2img":
             parts.append(f"Pose strength: {job.pose_strength}")
         if job.hires and job.mode in ("txt2img", "img2img"):

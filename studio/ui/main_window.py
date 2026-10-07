@@ -11,13 +11,13 @@ from PIL import Image
 from PySide6.QtCore import QSize, Qt, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
+    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QInputDialog, QGroupBox, QHBoxLayout,
     QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit,
     QProgressBar, QPushButton, QScrollArea, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QTabWidget,
     QVBoxLayout, QWidget,
 )
 
-from ..core import assistant, config, imaging
+from ..core import assistant, config, imaging, library, pnginfo
 from ..core.engine import RESOLUTIONS, SAMPLERS, Engine, Job, LoraSpec
 from ..core.presets import load_presets
 from .widgets import ImageView, MaskCanvas, pil_to_qimage
@@ -66,7 +66,9 @@ class MainWindow(QMainWindow):
         splitter.setSizes([520, 980])
         self.setCentralWidget(splitter)
 
+        self.setAcceptDrops(True)
         self._refresh_lists()
+        self._refresh_library()
         self._restore_ui()
         self._on_mode_changed()
         if not torch_cuda_ok():
@@ -204,6 +206,32 @@ class MainWindow(QMainWindow):
         v.addWidget(self.negative)
         lay.addWidget(g)
 
+        # ---- library
+        g = QGroupBox("Библиотека промптов")
+        v = QVBoxLayout(g)
+        row = QHBoxLayout()
+        self.lib_pick = QComboBox()
+        self.lib_pick.setMinimumWidth(180)
+        b_load = QPushButton("Загрузить")
+        b_load.clicked.connect(self._library_load)
+        row.addWidget(self.lib_pick, 1)
+        row.addWidget(b_load)
+        v.addLayout(row)
+        row = QHBoxLayout()
+        b_save = QPushButton("Сохранить текущее…")
+        b_save.clicked.connect(lambda: self._library_save())
+        b_del = QPushButton("Удалить")
+        b_del.clicked.connect(self._library_delete)
+        b_png = QPushButton("Из PNG…")
+        b_png.setToolTip("Взять промпт и настройки из картинки (этой программы, A1111 или Forge). "
+                         "Можно просто перетащить PNG в окно.")
+        b_png.clicked.connect(self._params_from_file)
+        row.addWidget(b_save)
+        row.addWidget(b_del)
+        row.addWidget(b_png)
+        v.addLayout(row)
+        lay.addWidget(g)
+
         # ---- params
         g = QGroupBox("Параметры")
         f = QFormLayout(g)
@@ -300,6 +328,9 @@ class MainWindow(QMainWindow):
         self.grok_status = QLabel()
         self.grok_status.setWordWrap(True)
         lay.addWidget(self.grok_status)
+        b = QPushButton("Сохранить результат в библиотеку…")
+        b.clicked.connect(lambda: self._library_save(self.grok_idea.toPlainText().strip()[:60]))
+        lay.addWidget(b)
         lay.addStretch()
         return w
 
@@ -423,6 +454,9 @@ class MainWindow(QMainWindow):
             b = QPushButton(text)
             b.clicked.connect(lambda _=False, m=mode: self._send_to(m))
             row.addWidget(b)
+        b = QPushButton("Параметры → в поля")
+        b.clicked.connect(self._params_from_current)
+        row.addWidget(b)
         b = QPushButton("Взять сид")
         b.clicked.connect(self._reuse_seed)
         row.addWidget(b)
@@ -483,10 +517,12 @@ class MainWindow(QMainWindow):
             self.status.setText("Положите SDXL-чекпоинт (.safetensors) в папку models/checkpoints и нажмите ⟳.")
 
     def _restore_ui(self) -> None:
-        ui = self.settings.ui
-        if not ui:
+        if not self.settings.ui:
             self._on_preset()
             return
+        self._apply_snapshot(self.settings.ui)
+
+    def _apply_snapshot(self, ui: dict) -> None:
         self.preset.blockSignals(True)
         self.preset.setCurrentText(ui.get("preset", ""))
         self.preset.blockSignals(False)
@@ -503,11 +539,12 @@ class MainWindow(QMainWindow):
         self.upscaler.setCurrentText(ui.get("upscaler", self.upscaler.currentText()))
         self.detail_prompt.setText(ui.get("detail_prompt", ""))
         self._select_resolution(tuple(ui.get("resolution") or ()) or None)
+        self.lora_table.setRowCount(0)
         for spec in ui.get("loras", []):
             self._add_lora(spec[0], spec[1])
 
-    def _save_ui(self) -> None:
-        self.settings.ui = {
+    def _snapshot(self) -> dict:
+        return {
             "preset": self.preset.currentText(), "prompt": self.prompt.toPlainText(),
             "negative": self.negative.toPlainText(), "sampler": self.sampler.currentText(),
             "upscaler": self.upscaler.currentText(), "detail_prompt": self.detail_prompt.text(),
@@ -517,6 +554,9 @@ class MainWindow(QMainWindow):
                 "hires_steps", "detail_strength", "pose_strength", "strength", "mask_blur")},
             **{n: getattr(self, n).isChecked() for n in ("hires", "fix_faces", "fix_hands", "only_masked")},
         }
+
+    def _save_ui(self) -> None:
+        self.settings.ui = self._snapshot()
         self.settings.last_checkpoint = self.checkpoint.currentText()
         self.settings.grok_api_key = self.grok_key.text().strip()
         self.settings.grok_model = self.grok_model.text().strip()
@@ -657,6 +697,124 @@ class MainWindow(QMainWindow):
         for r in range(self.lora_table.rowCount()):
             out.append(LoraSpec(self.lora_table.item(r, 0).text(), self.lora_table.cellWidget(r, 1).value()))
         return out
+
+    # ================================================================ library / png
+
+    def _refresh_library(self, entries: list[dict] | None = None) -> None:
+        entries = library.load() if entries is None else entries
+        self.lib_pick.clear()
+        for e in entries:
+            self.lib_pick.addItem(e["name"], e)
+
+    def _library_save(self, default: str = "") -> None:
+        name, ok = QInputDialog.getText(self, "Сохранить в библиотеку", "Название:",
+                                        text=default or self.prompt.toPlainText().strip()[:60])
+        name = name.strip()
+        if not ok or not name:
+            return
+        if self.lib_pick.findText(name) >= 0 and QMessageBox.question(
+                self, "Перезаписать?", f"«{name}» уже есть. Перезаписать?") != QMessageBox.Yes:
+            return
+        self._refresh_library(library.save(name, self._snapshot()))
+        self.lib_pick.setCurrentText(name)
+        self.status.setText(f"Сохранено в библиотеку: {name}")
+
+    def _library_load(self) -> None:
+        entry = self.lib_pick.currentData()
+        if entry:
+            self._apply_snapshot(entry["ui"])
+            self.status.setText(f"Загружено из библиотеки: {entry['name']}")
+
+    def _library_delete(self) -> None:
+        name = self.lib_pick.currentText()
+        if name and QMessageBox.question(self, "Удалить?", f"Удалить «{name}» из библиотеки?") == QMessageBox.Yes:
+            self._refresh_library(library.delete(name))
+
+    def _params_from_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Картинка с параметрами", str(config.OUTPUTS_DIR),
+                                              "Изображения (*.png *.jpg *.jpeg *.webp)")
+        if path:
+            self._load_params(path)
+
+    def _params_from_current(self) -> None:
+        cur = self._current_result()
+        if cur:
+            self._load_params(cur[0])
+
+    def _load_params(self, path) -> bool:
+        try:
+            text = pnginfo.read_parameters(path)
+        except OSError as e:
+            self.status.setText(f"Не удалось открыть файл: {e}")
+            return False
+        if not text:
+            self.status.setText("В этой картинке нет сохранённых параметров генерации.")
+            return False
+        p = pnginfo.parse_parameters(text)
+        # The saved prompt already contains the preset's tags, so don't add them twice.
+        no_preset = self.preset.findText("Без пресета")
+        if no_preset >= 0:
+            self.preset.blockSignals(True)
+            self.preset.setCurrentIndex(no_preset)
+            self.preset.blockSignals(False)
+            self.preset_note.setText(self.presets[no_preset].note)
+        self.prompt.setPlainText(p["prompt"])
+        self.negative.setPlainText(p["negative"])
+        for key, widget in (("steps", self.steps), ("cfg", self.cfg), ("seed", self.seed),
+                            ("clip_skip", self.clip_skip), ("strength", self.strength),
+                            ("hires_scale", self.hires_scale), ("hires_denoise", self.hires_denoise),
+                            ("hires_steps", self.hires_steps), ("detail_strength", self.detail_strength)):
+            if key in p:
+                widget.setValue(p[key])
+        for key, widget in (("hires", self.hires), ("fix_faces", self.fix_faces), ("fix_hands", self.fix_hands)):
+            widget.setChecked(bool(p.get(key, False)))
+        if "sampler" in p:
+            self.sampler.setCurrentText(p["sampler"])
+        if "upscaler" in p and self.upscaler.findText(p["upscaler"]) >= 0:
+            self.upscaler.setCurrentText(p["upscaler"])
+        if "size" in p:
+            self._select_resolution(None)
+            self._select_resolution(p["size"])
+            if self.resolution.currentData() is None:
+                self.width_.setValue(p["size"][0])
+                self.height_.setValue(p["size"][1])
+        self.lora_table.setRowCount(0)
+        for file, weight in p["loras"]:
+            self._add_lora(file, weight)
+
+        notes = ["Параметры загружены из картинки."]
+        if p["missing_loras"]:
+            notes.append("Нет LoRA в models/loras: " + ", ".join(p["missing_loras"]) + ".")
+        model = p.get("model")
+        if model and model != self.checkpoint.currentText():
+            if self.checkpoint.findText(model) >= 0:
+                self.checkpoint.setCurrentText(model)
+            else:
+                notes.append(f"Картинка сделана моделью «{model}», её нет в списке.")
+        self.status.setText(" ".join(notes))
+        self.left_tabs.setCurrentIndex(0)
+        return True
+
+    def dragEnterEvent(self, e):  # noqa: N802
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+
+    def dropEvent(self, e):  # noqa: N802
+        urls = [u.toLocalFile() for u in e.mimeData().urls() if u.isLocalFile()]
+        if not urls:
+            return
+        path = urls[0]
+        # Dropped onto the source tab: use as the source image; elsewhere: read its parameters.
+        if self.views.currentIndex() == 1 or not self._load_params(path):
+            try:
+                img = Image.open(path)
+                img.load()
+            except OSError:
+                return
+            self.canvas.set_image(img.convert("RGB"))
+            if self.mode.currentData() == "txt2img":
+                self.mode.setCurrentIndex(self.mode.findData("img2img"))
+            self.views.setCurrentIndex(1)
 
     # ================================================================ grok
 

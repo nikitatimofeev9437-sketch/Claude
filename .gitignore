@@ -6,3 +6,4 @@ settings.json
 models/hf_cache/
 models/*/*
 !models/*/.gitkeep
+prompts.json
