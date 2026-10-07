@@ -1,0 +1,42 @@
+[
+  {
+    "name": "Pony — Semi-realistic",
+    "note": "Для чекпоинтов на базе Pony Diffusion XL (Pony Realism, CyberRealistic Pony и т.п.).",
+    "prefix": "score_9, score_8_up, score_7_up, semi-realistic, detailed skin texture, soft cinematic lighting, sharp focus, ",
+    "suffix": "",
+    "negative": "score_6, score_5, score_4, worst quality, low quality, blurry, jpeg artifacts, bad anatomy, bad hands, extra fingers, missing fingers, deformed, disfigured, watermark, text, signature, monochrome",
+    "settings": {"sampler": "DPM++ 2M SDE Karras", "steps": 28, "cfg": 6.0, "clip_skip": 2}
+  },
+  {
+    "name": "Illustrious — Semi-realistic",
+    "note": "Для чекпоинтов на базе Illustrious XL / NoobAI.",
+    "prefix": "masterpiece, best quality, amazing quality, very aesthetic, semi-realistic, realistic skin, detailed eyes, soft lighting, ",
+    "suffix": "",
+    "negative": "worst quality, low quality, lowres, bad anatomy, bad hands, extra digits, fewer digits, blurry, jpeg artifacts, watermark, text, signature, sketch, flat color",
+    "settings": {"sampler": "Euler a", "steps": 28, "cfg": 5.5, "clip_skip": 2}
+  },
+  {
+    "name": "SDXL — Semi-realistic (общий)",
+    "note": "Для обычных SDXL-чекпоинтов без тегов качества.",
+    "prefix": "semi-realistic digital painting, detailed skin, subsurface scattering, cinematic lighting, soft shadows, depth of field, sharp focus, ",
+    "suffix": ", highly detailed",
+    "negative": "(worst quality, low quality:1.3), cartoon, anime, 3d render, plastic skin, blurry, bad anatomy, bad hands, extra limbs, deformed, watermark, text",
+    "settings": {"sampler": "DPM++ 2M Karras", "steps": 30, "cfg": 6.5, "clip_skip": 2}
+  },
+  {
+    "name": "SDXL — Фото-реализм",
+    "note": "Ближе к фотографии, для реалистичных SDXL-чекпоинтов.",
+    "prefix": "photo, realistic, natural skin texture, 85mm, soft natural light, film grain, ",
+    "suffix": "",
+    "negative": "(worst quality, low quality:1.3), painting, drawing, cartoon, anime, 3d, cgi, plastic skin, airbrushed, blurry, bad anatomy, bad hands, deformed, watermark, text",
+    "settings": {"sampler": "DPM++ 2M SDE Karras", "steps": 30, "cfg": 5.0, "clip_skip": 2}
+  },
+  {
+    "name": "Без пресета",
+    "note": "Промпт используется как есть.",
+    "prefix": "",
+    "suffix": "",
+    "negative": "",
+    "settings": {}
+  }
+]

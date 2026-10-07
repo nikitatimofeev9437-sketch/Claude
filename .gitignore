@@ -1,0 +1,8 @@
+venv/
+__pycache__/
+*.pyc
+outputs/
+settings.json
+models/hf_cache/
+models/*/*
+!models/*/.gitkeep
